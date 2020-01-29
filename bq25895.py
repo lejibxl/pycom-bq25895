@@ -53,6 +53,7 @@ class POWER:
         self.p_SHDN_.value(1)
         utime.sleep_us(10) #Enable Delay Time from Shutdown
         #ADC.ATTN_0DB (0-1), ADC.ATTN_2_5DB(0-1.33), ADC.ATTN_6DB(0-2), ADC.ATTN_11DB(0-3.55)
+        ILIM=VILIM=0
         ADC_GAIN=[0,1.334,1.995,3.548]
         for i, e in reversed(list(enumerate(ADC_GAIN))):
             adc_ILIM = self.adc.channel(attn=i,pin='P20')
@@ -62,8 +63,11 @@ class POWER:
             else:
                 VILIM = adc_ILIM.voltage()
                 break
-        PWIN_I = (KILIM * (VILIM / GAIN)) / (RILIM * 0.8)
-        print("ADC : {}, ADC_v = {}, PWIN_I : {}".format(adc_ILIM(), VILIM, PWIN_I) )
+        if ILIM > 0 :
+            PWIN_I = (KILIM * (VILIM / GAIN)) / (RILIM * 0.8)
+        else :
+            PWIN_I =0
+        #print("ADC : {}, ADC_v = {}, PWIN_I : {}".format(adc_ILIM(), VILIM, PWIN_I) )
         self.p_SHDN_.value(0)
         return PWIN_I
 
@@ -74,11 +78,11 @@ class POWER:
         delta = utime.ticks_diff(self.pwr_ticks , old)
         self.pwr_nAH = self.pwr_nAH + int(self.getPWR()  * delta / 3600)
         uAH = self.pwr_nAH // 1000
-        print("nAH : {}, uAH : {}".format(self.pwr_nAH, uAH))
+        #print("nAH : {}, uAH : {}".format(self.pwr_nAH, uAH))
         if uAH > 0 :
             self.pwr_nAH = self.pwr_nAH  - (uAH * 1000)
             uAH = pycom.nvs_get("pwr_uAH") + uAH
-            print("pwr_uAH :{}".format(uAH))
+            #print("pwr_uAH :{}".format(uAH))
             pycom.nvs_set("pwr_uAH", uAH )
 
     @property
@@ -94,10 +98,8 @@ class BQ25895:
     def __init__(self, sda = 'P9', scl = 'P10'):
         from machine import I2C
         self.i2c = I2C(0, mode=I2C.MASTER, pins=(sda, scl))
-        self._setBit(0x02,[None,1,None,None,None,None,None,None])
-        #self._setBit(0x00,[None,1,1,1,1,1,1,1])
-        #self._setBit(0x04,[1,None,None,None,None,None,None,None])  #enable current pulse control
-        #self._setBit(0x04,[None,None,None,None,None,None,1,None])   #enable current pulse control UP & DN
+        self.reset()
+
     def _setBit(self, reg, values):
         if len(values) == 8:
             values.reverse()
@@ -112,14 +114,19 @@ class BQ25895:
                     regVal = (regVal & mask)
             if regValOld != regVal:
                 self.i2c.writeto_mem(I2CADDR, reg, regVal)
-                print("write : {} to {}".format(bin(regVal),reg))
+                print("write : {} > {} to {:02X}".format(values, bin(regVal),reg))
 
     def readBit(self, reg):
         regVal = self.i2c.readfrom_mem(I2CADDR , reg, 1)[0]
         return regVal
 
     def reset(self):
-        self._setBit(0x14,[1,None,None,None,None,None,None,None])
+        self._setBit(0x14,[1,None,None,None,None,None,None,None]) #reset chip
+        self._setBit(0x02,[None,1,None,None,None,None,None,None]) #ADC Conversion Rate Selection  – Start 1s Continuous Conversion
+        self._setBit(0x07,[None,None,0,0,None,None,None,None]) #disable watchdog
+        #self._setBit(0x00,[None,1,1,1,1,1,1,1])
+        #self._setBit(0x04,[1,None,None,None,None,None,None,None])  #enable current pulse control
+        #self._setBit(0x04,[None,None,None,None,None,None,1,None])   #enable current pulse control UP & DN
 
     def charge_enable(self, enable):
         self._setBit( 0x03,[None,None,None,1 if enable == True else 0,None,None,None])
@@ -174,7 +181,7 @@ class BQ25895:
     def read_stat(self):
         ret1 = self.i2c.readfrom_mem(I2CADDR,0x0B, 1)
         ret2 = self.i2c.readfrom_mem(I2CADDR,0x0C, 1)
-        print("0x0B:{:08b}, 0x0C:{:08b}".format(ord(ret1),ord(ret2)))
+        #print("0x0B:{:08b}, 0x0C:{:08b}".format(ord(ret1),ord(ret2)))
         return [ret1, ret2]
 
     def read_vbus_volt(self):
@@ -233,11 +240,20 @@ if __name__ == '__main__':
     import time
     from machine import ADC
     bq25895=BQ25895()
-    power=POWER()
-    bq25895.reset()
+    #power=POWER()
+    #bq25895.reset()
     time.sleep_ms(550)
-    bq25895._setBit(0x14,[1,None,None,None,None,None,None,None])
-    a="1"
+    #bq25895._setBit(0x14,[1,None,None,None,None,None,None,None])
+    a="0"
+    if a == "0": #test interrupt
+        from machine import Pin
+        #bq25895._setBit(0x07,[None,None,0,0,None,None,None,None])
+        p_CHRG_INT = Pin('P19', mode=Pin.IN,pull=Pin.PULL_UP ) # BQ25895
+        while True:
+            stat=bq25895.read_stat()
+            INT=p_CHRG_INT.value()
+            if INT !=1 or stat[1] != b'\x00' :
+                print(INT,stat)
     if a == "1":
         #__alarm = Timer.Alarm(power.mesure, ms=1000, periodic=True)
         while True:
