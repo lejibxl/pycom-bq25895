@@ -95,10 +95,21 @@ class POWER:
 
 class BQ25895:
     I2CADDR=const(0x6A)
-    def __init__(self, sda = 'P9', scl = 'P10'):
+    def __init__(self, sda = 'P9', scl = 'P10', intr= 'P19', handler=None):
         from machine import I2C
+        self._user_handler = handler
         self.i2c = I2C(0, mode=I2C.MASTER, pins=(sda, scl))
         self.reset()
+        self.pin_intr = Pin(intr, mode=Pin.IN,pull=Pin.PULL_UP )
+        self.pin_intr.callback(trigger=Pin.IRQ_FALLING, handler=self._int_handler)
+    def _int_handler(self, pin_o):
+        print("BQ25895 interrupt")
+        REG0C1 = self.i2c.readfrom_mem(I2CADDR,0x0C, 1)[0] #1st read reports the pre-existing fault register
+        REG0C2 = self.i2c.readfrom_mem(I2CADDR,0x0C, 1)[0] #2nd read reports the current fault register status
+        REG0B = self.i2c.readfrom_mem(I2CADDR,0x0B, 1)[0] #2nd read reports the current fault register status
+        print("0x0C1st:{:08b} 0x0C2nd:{:08b} 0x0B:{:08b}".format(REG0C1,REG0C2,REG0B))
+        if self._user_handler is not None:
+            self._user_handler(pin_o)
 
     def _setBit(self, reg, values):
         if len(values) == 8:
@@ -247,12 +258,13 @@ if __name__ == '__main__':
     a="0"
     if a == "0": #test interrupt
         from machine import Pin
-        #bq25895._setBit(0x07,[None,None,0,0,None,None,None,None])
-        p_CHRG_INT = Pin('P19', mode=Pin.IN,pull=Pin.PULL_UP ) # BQ25895
+        p_CHRG_INT = Pin("P3")
+        mem = None
         while True:
             stat=bq25895.read_stat()
             INT=p_CHRG_INT.value()
-            if INT !=1 or stat[1] != b'\x00' :
+            if INT != mem or stat[1] != b'\x00' :
+                mem = INT
                 print(INT,stat)
     if a == "1":
         #__alarm = Timer.Alarm(power.mesure, ms=1000, periodic=True)
