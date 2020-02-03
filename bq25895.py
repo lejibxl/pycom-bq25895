@@ -24,7 +24,7 @@ SDP_STAT = ['USB100 input is detected',
 
 class POWER:
     # voltage taken from ILIM and amplified by an ampli op
-    def __init__(self):
+    def __init__(self, logger=None):
         self.adc = ADC()
         self.p_SHDN_ = Pin('P21', mode=Pin.OUT) #shutdown/enable ampli op
         self.pwr_ticks = utime.ticks_us()
@@ -36,9 +36,20 @@ class POWER:
         self.seconds = 0
         self.__alarm = Timer.Alarm(self.mesure, 1, periodic=True)
 
+    def _log(self, level, format_string, *args):
+        """Log a message.
+        :param level: the priority level at which to log
+        :param format_string: the core message string with embedded formatting directives
+        :param args: arguments to ``format_string.format()``, can be empty
+        """
+        if self._logger !=None:
+            self._logger(level, format_string, *args)
+        else:
+            pass
+
     def _seconds_handler(self, alarm):
         self.seconds += 1
-        print("%02d seconds have passed" % self.seconds)
+        _log("%02d seconds have passed" % self.seconds,20)
         if self.seconds == 10:
             alarm.cancel() # stop counting after 10 seconds
 
@@ -95,21 +106,39 @@ class POWER:
 
 class BQ25895:
     I2CADDR=const(0x6A)
-    def __init__(self, sda = 'P9', scl = 'P10', intr= 'P19', handler=None):
+    def __init__(self, sda = 'P9', scl = 'P10', intr= 'P19', handler=None, logger=None):
         from machine import I2C
         self._user_handler = handler
+        self._logger = logger
         self.i2c = I2C(0, mode=I2C.MASTER, pins=(sda, scl))
         self.reset()
+        self.pg_stat = self.read_byte(0x0B) & 0b00000100
         self.pin_intr = Pin(intr, mode=Pin.IN,pull=Pin.PULL_UP )
         self.pin_intr.callback(trigger=Pin.IRQ_FALLING, handler=self._int_handler)
     def _int_handler(self, pin_o):
         print("BQ25895 interrupt")
-        REG0C1 = self.i2c.readfrom_mem(I2CADDR,0x0C, 1)[0] #1st read reports the pre-existing fault register
-        REG0C2 = self.i2c.readfrom_mem(I2CADDR,0x0C, 1)[0] #2nd read reports the current fault register status
-        REG0B = self.i2c.readfrom_mem(I2CADDR,0x0B, 1)[0] #2nd read reports the current fault register status
+        REG0C1 = self.read_byte(0x0C) #1st read reports the pre-existing fault register
+        REG0C2 = self.read_byte(0x0C) #2nd read reports the current fault register status
+        REG0B = self.read_byte(0x0B) #2nd read reports the current fault register status
         print("0x0C1st:{:08b} 0x0C2nd:{:08b} 0x0B:{:08b}".format(REG0C1,REG0C2,REG0B))
+        if self.pg_stat != REG0B & 0b00000100:
+            self.pg_stat = REG0B & 0b00000100
+            if REG0B & 0b00000100 > 1:
+                print("RAZ pwr_uAH ")
+                pycom.nvs_set("pwr_uAH",0)
         if self._user_handler is not None:
-            self._user_handler(pin_o)
+            self._user_handler(REG0C1,REG0C2,REG0B)
+
+    def _log(self, level, format_string, *args):
+        """Log a message.
+        :param level: the priority level at which to log
+        :param format_string: the core message string with embedded formatting directives
+        :param args: arguments to ``format_string.format()``, can be empty
+        """
+        if self._logger !=None:
+            self._logger(level, format_string, *args)
+        else:
+            pass
 
     def _setBit(self, reg, values):
         if len(values) == 8:
@@ -125,9 +154,9 @@ class BQ25895:
                     regVal = (regVal & mask)
             if regValOld != regVal:
                 self.i2c.writeto_mem(I2CADDR, reg, regVal)
-                print("write : {} > {} to {:02X}".format(values, bin(regVal),reg))
+                self._log("write : {} > {} to {:02X}".format(values, bin(regVal),reg),20)
 
-    def readBit(self, reg):
+    def read_byte(self, reg):
         regVal = self.i2c.readfrom_mem(I2CADDR , reg, 1)[0]
         return regVal
 
@@ -294,7 +323,7 @@ if __name__ == '__main__':
                 print("IN Stat: {}, vbus:{:03b}.{}, in Imax:{}, in U:{}".format(bq25895.pg_stat_str(),bq25895.vbus_type(),bq25895.vbus_type_str(), bq25895.read_input_current_max(),bq25895.read_vbus_volt()))
                 i=0
                 while i <= 0x14:
-                    print("{:02x}:{:08b}".format(i,bq25895.readBit(i)), end=' ')
+                    print("{:02x}:{:08b}".format(i,bq25895.read_byte(i)), end=' ')
                     i = i + 1
                 print("---")
             """
