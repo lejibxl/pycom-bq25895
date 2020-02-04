@@ -1,7 +1,12 @@
 from machine import I2C,ADC,Pin,Timer
+import logging.logging as logging
 import utime
 import pycom
 import ubinascii
+
+l = logging.getLogger(__name__)
+l.setLevel(logging.INFO)
+
 VBUS_TYPE =['NONE',
             'SDP',
 	        'CDP (1.5A)',
@@ -22,9 +27,12 @@ PG_STAT =  ['Not Power Good',
 SDP_STAT = ['USB100 input is detected',
             'USB500 input is detected']
 
+ADC_GAIN=[0,1.334,1.995,3.548]
+ADC_GAINstr=['ATTN_0DB (0-1v)', 'ATTN_2_5DB(0-1.33v)', 'ATTN_6DB(0-2v)', 'ATTN_11DB(0-3.55v)']
+
 class POWER:
     # voltage taken from ILIM and amplified by an ampli op
-    def __init__(self, logger=None):
+    def __init__(self):
         self.adc = ADC()
         self.p_SHDN_ = Pin('P21', mode=Pin.OUT) #shutdown/enable ampli op
         self.pwr_ticks = utime.ticks_us()
@@ -33,27 +41,14 @@ class POWER:
         except Exception as e:
             pycom.nvs_set("pwr_uAH",0)
         self.pwr_nAH = 0
-        self.seconds = 0
         self.__alarm = Timer.Alarm(self.mesure, 1, periodic=True)
 
-    def _log(self, level, format_string, *args):
-        """Log a message.
-        :param level: the priority level at which to log
-        :param format_string: the core message string with embedded formatting directives
-        :param args: arguments to ``format_string.format()``, can be empty
-        """
-        if self._logger !=None:
-            self._logger(level, format_string, *args)
-        else:
-            pass
-
-    def _seconds_handler(self, alarm):
-        self.seconds += 1
-        _log("%02d seconds have passed" % self.seconds,20)
-        if self.seconds == 10:
-            alarm.cancel() # stop counting after 10 seconds
+    def __del__(self):
+        self.__alarm.cancel()
+        self.__alarm = None
 
     def reset(self):
+        l.debug("BQ>reset chip")
         self.pwr_nAH = 0
         pycom.nvs_set("pwr_uAH",0)
 
@@ -80,6 +75,7 @@ class POWER:
             PWIN_I =0
         #print("ADC : {}, ADC_v = {}, PWIN_I : {}".format(adc_ILIM(), VILIM, PWIN_I) )
         self.p_SHDN_.value(0)
+        l.debug("BQ>ATTN:{}, ILIM:{}, PWIN_I:{}".format(ADC_GAINstr[i],ILIM,PWIN_I))
         return PWIN_I
 
 
@@ -106,39 +102,27 @@ class POWER:
 
 class BQ25895:
     I2CADDR=const(0x6A)
-    def __init__(self, sda = 'P9', scl = 'P10', intr= 'P19', handler=None, logger=None):
+    def __init__(self, sda = 'P9', scl = 'P10', intr= 'P19', handler=None):
         from machine import I2C
-        self._user_handler = handler
-        self._logger = logger
         self.i2c = I2C(0, mode=I2C.MASTER, pins=(sda, scl))
+        self._user_handler = handler
         self.reset()
-        self.pg_stat = self.read_byte(0x0B) & 0b00000100
+        self.pg_stat_last = self.read_byte(0x0B) & 0b00000100
         self.pin_intr = Pin(intr, mode=Pin.IN,pull=Pin.PULL_UP )
         self.pin_intr.callback(trigger=Pin.IRQ_FALLING, handler=self._int_handler)
     def _int_handler(self, pin_o):
-        print("BQ25895 interrupt")
+        l.info("BQ>BQ25895 interrupt")
         REG0C1 = self.read_byte(0x0C) #1st read reports the pre-existing fault register
         REG0C2 = self.read_byte(0x0C) #2nd read reports the current fault register status
         REG0B = self.read_byte(0x0B) #2nd read reports the current fault register status
-        print("0x0C1st:{:08b} 0x0C2nd:{:08b} 0x0B:{:08b}".format(REG0C1,REG0C2,REG0B))
-        if self.pg_stat != REG0B & 0b00000100:
-            self.pg_stat = REG0B & 0b00000100
+        l.debug("0x0C1st:{:08b} 0x0C2nd:{:08b} 0x0B:{:08b}".format(REG0C1,REG0C2,REG0B))
+        if self.pg_stat_last != REG0B & 0b00000100:
+            self.pg_stat_last = REG0B & 0b00000100
             if REG0B & 0b00000100 > 1:
                 print("RAZ pwr_uAH ")
                 pycom.nvs_set("pwr_uAH",0)
         if self._user_handler is not None:
             self._user_handler(REG0C1,REG0C2,REG0B)
-
-    def _log(self, level, format_string, *args):
-        """Log a message.
-        :param level: the priority level at which to log
-        :param format_string: the core message string with embedded formatting directives
-        :param args: arguments to ``format_string.format()``, can be empty
-        """
-        if self._logger !=None:
-            self._logger(level, format_string, *args)
-        else:
-            pass
 
     def _setBit(self, reg, values):
         if len(values) == 8:
@@ -154,7 +138,7 @@ class BQ25895:
                     regVal = (regVal & mask)
             if regValOld != regVal:
                 self.i2c.writeto_mem(I2CADDR, reg, regVal)
-                self._log("write : {} > {} to {:02X}".format(values, bin(regVal),reg),20)
+                l.debug("BQ>write : {} > {} to {:02X}".format(values, bin(regVal),reg))
 
     def read_byte(self, reg):
         regVal = self.i2c.readfrom_mem(I2CADDR , reg, 1)[0]
@@ -189,10 +173,12 @@ class BQ25895:
 
     def pg_stat(self):
         ret = self.i2c.readfrom_mem(I2CADDR,0x0B, 1)
+        l.debug("ret:{}".format(ret))
         return (ret[0] & 0b00000100) >> 2
 
     def pg_stat_str(self):
         ret = self.pg_stat()
+        l.debug("ret:{}".format(ret))
         return PG_STAT[ret]
 
     def vsys_stat(self):
@@ -280,11 +266,11 @@ if __name__ == '__main__':
     import time
     from machine import ADC
     bq25895=BQ25895()
-    #power=POWER()
+    power=POWER()
     #bq25895.reset()
     time.sleep_ms(550)
     #bq25895._setBit(0x14,[1,None,None,None,None,None,None,None])
-    a="0"
+    a="2"
     if a == "0": #test interrupt
         from machine import Pin
         p_CHRG_INT = Pin("P3")
@@ -310,12 +296,7 @@ if __name__ == '__main__':
             print("Bat stat:{}, I:{}, V:{}".format(bq25895.chrg_stat_str(), bq25895.read_charge_current(), bq25895.read_battery_volt()))
             print("SYS status:{}, V:{}".format(bq25895.vsys_stat_str(), bq25895.read_sys_volt()))
             print("PMID Boost status" )
-
-            VILIM = adc_ILIM.voltage()
-            RILIM = 768
-            KILIM = 365
-            PWIN_I = (KILIM * VILIM) / (RILIM * 0.8)
-            print("RPY_I:{}, CRG_I:{} ".format(PWIN_I,bq25895.read_charge_current()))
+            print("CRG_I:{} ".format(bq25895.read_charge_current()))
             print("pwr_uAH:{}, power:{}".format(power.pwr_uAH, power.getPWR()))
 
             """
