@@ -103,6 +103,19 @@ class BQ25895:
         ret = self.chrg_stat()
         return CHRG_STAT[ret]
 
+    def read_battery_percent(self):
+        if self.chrg_stat():
+            ret=  100
+        else:
+            vbat=self.read_battery_volt()
+            if vbat >= 4200 :
+                ret=100
+            elif vbat <= 2800 :
+                ret = 0
+            else:
+                ret = int((vbat - 2800) / 1400 * 100)
+        return ret
+
     def pg_stat(self):
         ret = self.i2c.readfrom_mem(I2CADDR,0x0B, 1)
         l.debug("ret:{}".format(ret))
@@ -121,7 +134,7 @@ class BQ25895:
         ret = self.pg_stat()
         return "Regulation" if ret == 1 else "Not Regulation"
 
-    def read_battery_volt(self):
+    def read_battery_volt(self): #in mv
         ret = self.i2c.readfrom_mem(I2CADDR,0x0E, 1)
         volt = 2304 + (int(ret[0] & 0b01111111) * 20)
         return volt
@@ -315,4 +328,5 @@ if __name__ == '__main__':
                     i = i + 1
                 print("---")
             """
+            print("charge en % {}".format(bq25895.read_battery_percent()))
             time.sleep(3)
