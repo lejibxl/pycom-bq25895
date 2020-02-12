@@ -30,75 +30,7 @@ SDP_STAT = ['USB100 input is detected',
 ADC_GAIN=[0,1.334,1.995,3.548]
 ADC_GAINstr=['ATTN_0DB (0-1v)', 'ATTN_2_5DB(0-1.33v)', 'ATTN_6DB(0-2v)', 'ATTN_11DB(0-3.55v)']
 
-class POWER:
-    # voltage taken from ILIM and amplified by an ampli op
-    def __init__(self):
-        self.adc = ADC()
-        self.p_SHDN_ = Pin('P21', mode=Pin.OUT) #shutdown/enable ampli op
-        self.pwr_ticks = utime.ticks_us()
-        try:
-            pycom.nvs_get("pwr_uAH")
-        except Exception as e:
-            pycom.nvs_set("pwr_uAH",0)
-        self.pwr_nAH = 0
-        self.__alarm = Timer.Alarm(self.mesure, 1, periodic=True)
 
-    def __del__(self):
-        self.__alarm.cancel()
-        self.__alarm = None
-
-    def reset(self):
-        l.debug("BQ>reset chip")
-        self.pwr_nAH = 0
-        pycom.nvs_set("pwr_uAH",0)
-
-    def getPWR(self):
-        RILIM = 130
-        KILIM = 365
-        GAIN = 12.12
-        self.p_SHDN_.value(1)
-        utime.sleep_us(10) #Enable Delay Time from Shutdown
-        #ADC.ATTN_0DB (0-1), ADC.ATTN_2_5DB(0-1.33), ADC.ATTN_6DB(0-2), ADC.ATTN_11DB(0-3.55)
-        ILIM=VILIM=0
-        ADC_GAIN=[0,1.334,1.995,3.548]
-        for i, e in reversed(list(enumerate(ADC_GAIN))):
-            adc_ILIM = self.adc.channel(attn=i,pin='P20')
-            ILIM = adc_ILIM()
-            if ILIM < 2000 and i > 0:
-                pass
-            else:
-                VILIM = adc_ILIM.voltage()
-                break
-        if ILIM > 0 :
-            PWIN_I = (KILIM * (VILIM / GAIN)) / (RILIM * 0.8)
-        else :
-            PWIN_I =0
-        #print("ADC : {}, ADC_v = {}, PWIN_I : {}".format(adc_ILIM(), VILIM, PWIN_I) )
-        self.p_SHDN_.value(0)
-        l.debug("BQ>ATTN:{}, ILIM:{}, PWIN_I:{}".format(ADC_GAINstr[i],ILIM,PWIN_I))
-        return PWIN_I
-
-
-    def mesure(self, alarm):
-        old = self.pwr_ticks
-        self.pwr_ticks = utime.ticks_us()
-        delta = utime.ticks_diff(self.pwr_ticks , old)
-        self.pwr_nAH = self.pwr_nAH + int(self.getPWR()  * delta / 3600)
-        uAH = self.pwr_nAH // 1000
-        #print("nAH : {}, uAH : {}".format(self.pwr_nAH, uAH))
-        if uAH > 0 :
-            self.pwr_nAH = self.pwr_nAH  - (uAH * 1000)
-            uAH = pycom.nvs_get("pwr_uAH") + uAH
-            #print("pwr_uAH :{}".format(uAH))
-            pycom.nvs_set("pwr_uAH", uAH )
-
-    @property
-    def pwr_uAH(self):
-        return pycom.nvs_get("pwr_uAH")
-
-    @property
-    def pwr_mAH(self):
-        return int(round(pycom.nvs_get("pwr_uAH")/1000) )
 
 class BQ25895:
     I2CADDR=const(0x6A)
@@ -261,12 +193,87 @@ class BQ25895:
             1 if (regVal & 0b00000010) > 0 else 0,
             1 if (regVal & 0b00000001) > 0 else 0]
             )
+
+    #inner class
+    #Uniquement avec un ESP32 pour mesurer le courant d'entrée
+    class POWER:
+            # voltage taken from ILIM and amplified by an ampli op
+            def __init__(self,bq25895):
+                self._bq25895=bq25895
+                self.adc = ADC()
+                self.p_SHDN_ = Pin('P21', mode=Pin.OUT) #shutdown/enable ampli op
+                self.pwr_ticks = utime.ticks_us()
+                try:
+                    pycom.nvs_get("pwr_uAH")
+                except Exception as e:
+                    pycom.nvs_set("pwr_uAH",0)
+                self.pwr_nAH = 0
+                self.__alarm = Timer.Alarm(self.mesure, 1, periodic=True)
+
+            def __del__(self):
+                self.__alarm.cancel()
+                self.__alarm = None
+
+            def reset(self):
+                l.debug("BQ>reset chip")
+                self.pwr_nAH = 0
+                pycom.nvs_set("pwr_uAH",0)
+
+            def getPWR(self): #en
+                RILIM = 130
+                KILIM = 365
+                GAIN = 12.12
+                self.p_SHDN_.value(1)
+                utime.sleep_us(10) #Enable Delay Time from Shutdown
+                #ADC.ATTN_0DB (0-1), ADC.ATTN_2_5DB(0-1.33), ADC.ATTN_6DB(0-2), ADC.ATTN_11DB(0-3.55)
+                ILIM=VILIM=0
+                ADC_GAIN=[0,1.334,1.995,3.548]
+                for i, e in reversed(list(enumerate(ADC_GAIN))):
+                    adc_ILIM = self.adc.channel(attn=i,pin='P20')
+                    ILIM = adc_ILIM()
+                    if ILIM < 2000 and i > 0:
+                        pass
+                    else:
+                        VILIM = adc_ILIM.voltage()
+                        break
+                if ILIM > 0 :
+                    PWIN_I = (KILIM * (VILIM / GAIN)) / (RILIM * 0.8)
+                elif self._bq25895.pg_stat() > 0 : #PYCOM mais prob avec ADC ESP32 pour faible valeur
+                    PWIN_I = 60.0
+                else :
+                    PWIN_I =0
+                #print("ADC : {}, ADC_v = {}, PWIN_I : {}".format(adc_ILIM(), VILIM, PWIN_I) )
+                self.p_SHDN_.value(0)
+                l.debug("BQ>ATTN:{}, ILIM:{}, PWIN_I:{}".format(ADC_GAINstr[i],ILIM,PWIN_I))
+                return PWIN_I
+
+
+            def mesure(self, alarm):
+                old = self.pwr_ticks
+                self.pwr_ticks = utime.ticks_us()
+                delta = utime.ticks_diff(self.pwr_ticks , old)
+                self.pwr_nAH = self.pwr_nAH + int(self.getPWR()  * delta / 3600)
+                uAH = self.pwr_nAH // 1000
+                #print("nAH : {}, uAH : {}".format(self.pwr_nAH, uAH))
+                if uAH > 0 :
+                    self.pwr_nAH = self.pwr_nAH  - (uAH * 1000)
+                    uAH = pycom.nvs_get("pwr_uAH") + uAH
+                    #print("pwr_uAH :{}".format(uAH))
+                    pycom.nvs_set("pwr_uAH", uAH )
+
+            @property
+            def pwr_uAH(self):
+                return pycom.nvs_get("pwr_uAH")
+
+            @property
+            def pwr_mAH(self):
+                return int(round(pycom.nvs_get("pwr_uAH")/1000) )
 if __name__ == '__main__':
     from machine import I2C
     import time
     from machine import ADC
     bq25895=BQ25895()
-    power=POWER()
+    power=bq25895.POWER(bq25895)
     #bq25895.reset()
     time.sleep_ms(550)
     #bq25895._setBit(0x14,[1,None,None,None,None,None,None,None])
